@@ -3,6 +3,9 @@ kind: Deployment
 metadata:
   name: flask-app
   namespace: fluidai-demo
+  labels:
+    app: flask-app
+    version: "1.0"
   annotations:
     deployment.kubernetes.io/revision: "1"
 spec:
@@ -10,8 +13,8 @@ spec:
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxSurge: 1         # Spin up 1 extra pod before killing old ones
-      maxUnavailable: 0   # Never drop below 2 healthy pods
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       app: flask-app
@@ -26,10 +29,11 @@ spec:
     spec:
       containers:
       - name: flask-app
-        image: YOUR_DOCKERHUB_USER/flask-app:latest
+        image: ghcr.io/rajujena0/flask-app:latest
         imagePullPolicy: Always
         ports:
         - containerPort: 5000
+          name: http
         envFrom:
         - secretRef:
             name: app-secrets
@@ -37,14 +41,15 @@ spec:
             name: app-config
         readinessProbe:
           httpGet:
-            path: /health/ready   # Checks Redis + Postgres connectivity
+            path: /health/ready
             port: 5000
           initialDelaySeconds: 8
           periodSeconds: 5
           failureThreshold: 3
+          successThreshold: 1
         livenessProbe:
           httpGet:
-            path: /health/live    # Lightweight — just confirms process is alive
+            path: /health/live
             port: 5000
           initialDelaySeconds: 15
           periodSeconds: 10

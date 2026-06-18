@@ -1,77 +1,106 @@
+# .github/workflows/ci-cd.yml
 name: CI/CD Pipeline
 
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
 
 env:
-  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/flask-app
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/flask-app
 
 jobs:
-  test:
-    name: Lint & Test
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-python@v4
-      with:
-        python-version: "3.11"
-    - name: Install deps
-      run: pip install -r app/requirements.txt pytest
-    - name: Basic smoke test
-      run: |
-        cd app
-        python -c "import app; print('Import OK')"
 
+  # ── Job 1: Build & push image to ghcr.io ──────────────────────────
   build:
     name: Build & Push Image
-    needs: test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write         # Required for ghcr.io push
+
     outputs:
-      image_tag: ${{ steps.meta.outputs.version }}
+      image_tag: ${{ github.sha }}
+
     steps:
     - uses: actions/checkout@v4
 
-    - name: Docker metadata
-      id: meta
-      uses: docker/metadata-action@v5
-      with:
-        images: ${{ env.IMAGE_NAME }}
-        tags: |
-          type=sha,prefix=,format=short
-          type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
-
-    - name: Login to Docker Hub
+    - name: Login to GitHub Container Registry
       uses: docker/login-action@v3
       with:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_TOKEN }}
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}   # Auto-provided, no setup needed
 
-    - name: Build and push
+    - name: Build and push image
       uses: docker/build-push-action@v5
       with:
         context: ./app
         push: true
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=gfp,scope=main   # Layer cache speeds up rebuilds
+        tags: |
+          ${{ env.IMAGE_NAME }}:latest
+          ${{ env.IMAGE_NAME }}:${{ github.sha }}
 
+  # ── Job 2: Deploy to Kubernetes ───────────────────────────────────
   deploy:
     name: Deploy to Kubernetes
     needs: build
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
+
     steps:
     - uses: actions/checkout@v4
-    - name: Update image tag in manifest
+
+    - name: Setup kubectl
+      uses: azure/setup-kubectl@v3
+
+    - name: Configure kubeconfig
       run: |
-        sed -i "s|YOUR_DOCKERHUB_USER/flask-app:latest|${{ env.IMAGE_NAME }}:${{ needs.build.outputs.image_tag }}|g" k8s/flask-deployment.yaml
-    - name: Show updated manifest (audit trail)
-      run: grep "image:" k8s/flask-deployment.yaml
-    - name: Deploy note
+        mkdir -p ~/.kube
+        echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+        chmod 600 ~/.kube/config
+
+    # Inject real secret values from GitHub Secrets into secret.yaml
+    - name: Generate secret.yaml with real values
       run: |
-        echo "In production: kubectl apply -f k8s/ --namespace fluidai-demo"
-        echo "Rolling out image: ${{ env.IMAGE_NAME }}:${{ needs.build.outputs.image_tag }}"
-        echo "Verify with: kubectl rollout status deployment/flask-app -n infra-demo"
+        sed -i "s|PLACEHOLDER_DB_URL|postgresql://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/${{ secrets.POSTGRES_DB }}|g" k8s/secret.yaml
+        sed -i "s|PLACEHOLDER_PG_PASS|${{ secrets.POSTGRES_PASSWORD }}|g" k8s/secret.yaml
+        sed -i "s|PLACEHOLDER_PG_USER|${{ secrets.POSTGRES_USER }}|g" k8s/secret.yaml
+        sed -i "s|PLACEHOLDER_PG_DB|${{ secrets.POSTGRES_DB }}|g" k8s/secret.yaml
+
+    # Deploy in strict dependency order
+    - name: Apply namespace
+      run: kubectl apply -f k8s/namespace.yaml
+
+    - name: Apply secrets and config
+      run: |
+        kubectl apply -f k8s/secret.yaml -n fluidai-demo
+        kubectl apply -f k8s/configmap.yaml -n fluidai-demo
+
+    - name: Deploy PostgreSQL
+      run: |
+        kubectl apply -f k8s/postgres-service.yaml -n fluidai-demo
+        kubectl apply -f k8s/postgres-statefulset.yaml -n fluidai-demo
+        kubectl wait --for=condition=ready pod -l app=postgres \
+          -n fluidai-demo --timeout=120s
+
+    - name: Deploy Redis
+      run: |
+        kubectl apply -f k8s/redis-service.yaml -n fluidai-demo
+        kubectl apply -f k8s/redis-deployment.yaml -n fluidai-demo
+        kubectl wait --for=condition=ready pod -l app=redis \
+          -n fluidai-demo --timeout=60s
+
+    - name: Deploy Flask app with new image
+      run: |
+        kubectl apply -f k8s/flask-service.yaml -n fluidai-demo
+        kubectl apply -f k8s/ingress.yaml -n fluidai-demo
+        kubectl set image deployment/flask-app \
+          flask-app=${{ env.IMAGE_NAME }}:${{ github.sha }} \
+          -n fluidai-demo
+        kubectl apply -f k8s/flask-deployment.yaml -n fluidai-demo
+        kubectl rollout status deployment/flask-app \
+          -n fluidai-demo --timeout=120s
+
+    - name: Verify deployment
+      run: |
+        kubectl get all -n fluidai-demo
+        kubectl get ingress -n fluidai-demo

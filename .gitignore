@@ -1,0 +1,5 @@
+# .gitignore
+k8s/secret.yaml       # never commit real secrets
+*.env
+kubeconfig
+k8s/secret.yaml

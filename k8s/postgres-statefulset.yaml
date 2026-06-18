@@ -4,7 +4,7 @@ metadata:
   name: postgres
   namespace: fluidai-demo
 spec:
-  serviceName: postgres
+  serviceName: "postgres"
   replicas: 1
   selector:
     matchLabels:
@@ -21,19 +21,29 @@ spec:
         - containerPort: 5432
         env:
         - name: POSTGRES_DB
-          value: appdb
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: POSTGRES_DB
         - name: POSTGRES_USER
-          value: admin
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: POSTGRES_USER
         - name: POSTGRES_PASSWORD
-          value: password
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: POSTGRES_PASSWORD
         readinessProbe:
           exec:
-            command: ["pg_isready", "-U", "admin", "-d", "appdb"]
+            command: ["pg_isready", "-U", "$(POSTGRES_USER)", "-d", "$(POSTGRES_DB)"]
           initialDelaySeconds: 10
           periodSeconds: 5
+          failureThreshold: 5
         livenessProbe:
           exec:
-            command: ["pg_isready", "-U", "admin"]
+            command: ["pg_isready", "-U", "$(POSTGRES_USER)"]
           initialDelaySeconds: 30
           periodSeconds: 10
         resources:
