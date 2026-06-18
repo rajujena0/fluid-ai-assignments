@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flask-app
+  namespace: fluidai-demo
+  annotations:
+    deployment.kubernetes.io/revision: "1"
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1         # Spin up 1 extra pod before killing old ones
+      maxUnavailable: 0   # Never drop below 2 healthy pods
+  selector:
+    matchLabels:
+      app: flask-app
+  template:
+    metadata:
+      labels:
+        app: flask-app
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "5000"
+    spec:
+      containers:
+      - name: flask-app
+        image: YOUR_DOCKERHUB_USER/flask-app:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 5000
+        envFrom:
+        - secretRef:
+            name: app-secrets
+        - configMapRef:
+            name: app-config
+        readinessProbe:
+          httpGet:
+            path: /health/ready   # Checks Redis + Postgres connectivity
+            port: 5000
+          initialDelaySeconds: 8
+          periodSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /health/live    # Lightweight — just confirms process is alive
+            port: 5000
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          failureThreshold: 3
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
