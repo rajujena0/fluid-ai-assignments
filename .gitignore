@@ -1,5 +1,9 @@
-# .gitignore
-k8s/secret.yaml       # never commit real secrets
-*.env
-kubeconfig
+# Never commit real secrets
 k8s/secret.yaml
+.env
+*.pem
+*.key
+kubeconfig
+__pycache__/
+*.pyc
+.DS_Store
