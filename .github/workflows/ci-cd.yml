@@ -1,36 +1,28 @@
 # .github/workflows/ci-cd.yml
 name: CI/CD Pipeline
-
 on:
   push:
     branches: [main]
-
 env:
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/flask-app
-
 jobs:
-
   # ── Job 1: Build & push image to ghcr.io ──────────────────────────
   build:
     name: Build & Push Image
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest          # ← keep this as-is, GitHub cloud is fine for building
     permissions:
       contents: read
-      packages: write         # Required for ghcr.io push
-
+      packages: write
     outputs:
       image_tag: ${{ github.sha }}
-
     steps:
     - uses: actions/checkout@v4
-
     - name: Login to GitHub Container Registry
       uses: docker/login-action@v3
       with:
         registry: ghcr.io
         username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}   # Auto-provided, no setup needed
-
+        password: ${{ secrets.GITHUB_TOKEN }}
     - name: Build and push image
       uses: docker/build-push-action@v5
       with:
@@ -44,62 +36,50 @@ jobs:
   deploy:
     name: Deploy to Kubernetes
     needs: build
-    runs-on: ubuntu-latest
-
+    runs-on: self-hosted             # ← CHANGED from ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-
-    - name: Setup kubectl
-      uses: azure/setup-kubectl@v3
-
     - name: Configure kubeconfig
       run: |
         mkdir -p ~/.kube
         echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
         chmod 600 ~/.kube/config
-
-    # Inject real secret values from GitHub Secrets into secret.yaml
+        kubectl cluster-info
     - name: Generate secret.yaml with real values
       run: |
         sed -i "s|PLACEHOLDER_DB_URL|postgresql://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/${{ secrets.POSTGRES_DB }}|g" k8s/secret.yaml
         sed -i "s|PLACEHOLDER_PG_PASS|${{ secrets.POSTGRES_PASSWORD }}|g" k8s/secret.yaml
         sed -i "s|PLACEHOLDER_PG_USER|${{ secrets.POSTGRES_USER }}|g" k8s/secret.yaml
         sed -i "s|PLACEHOLDER_PG_DB|${{ secrets.POSTGRES_DB }}|g" k8s/secret.yaml
-
-    # Deploy in strict dependency order
+        sed -i "s|PLACEHOLDER_REDIS_URL|redis://redis:6379/0|g" k8s/secret.yaml
     - name: Apply namespace
       run: kubectl apply -f k8s/namespace.yaml
-
     - name: Apply secrets and config
       run: |
         kubectl apply -f k8s/secret.yaml -n fluidai-demo
         kubectl apply -f k8s/configmap.yaml -n fluidai-demo
-
     - name: Deploy PostgreSQL
       run: |
         kubectl apply -f k8s/postgres-service.yaml -n fluidai-demo
         kubectl apply -f k8s/postgres-statefulset.yaml -n fluidai-demo
         kubectl wait --for=condition=ready pod -l app=postgres \
           -n fluidai-demo --timeout=120s
-
     - name: Deploy Redis
       run: |
         kubectl apply -f k8s/redis-service.yaml -n fluidai-demo
         kubectl apply -f k8s/redis-deployment.yaml -n fluidai-demo
         kubectl wait --for=condition=ready pod -l app=redis \
           -n fluidai-demo --timeout=60s
-
     - name: Deploy Flask app with new image
       run: |
         kubectl apply -f k8s/flask-service.yaml -n fluidai-demo
         kubectl apply -f k8s/ingress.yaml -n fluidai-demo
+        kubectl apply -f k8s/flask-deployment.yaml -n fluidai-demo
         kubectl set image deployment/flask-app \
           flask-app=${{ env.IMAGE_NAME }}:${{ github.sha }} \
           -n fluidai-demo
-        kubectl apply -f k8s/flask-deployment.yaml -n fluidai-demo
         kubectl rollout status deployment/flask-app \
           -n fluidai-demo --timeout=120s
-
     - name: Verify deployment
       run: |
         kubectl get all -n fluidai-demo
